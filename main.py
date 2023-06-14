@@ -2,7 +2,8 @@ import torch
 import torchvision.models as models
 import pytorch_lightning as pl
 from torch import nn, optim
-
+import numpy as np
+from PIL import Image
 import pandas as pd
 from torch.utils.data import Dataset
 from torchvision.io import read_image
@@ -21,11 +22,11 @@ class CelebADataset(Dataset):
         df = pd.read_csv(r"F:\celeba\archive\list_attr_celeba.csv")
 
         if split == 'train':
-            self.df = df[df['image_id'].isin(train)]
+            self.df = df[df['image_id'].isin(train)].reset_index()
         elif split == 'val':
-            self.df = df[df['image_id'].isin(val)]
+            self.df = df[df['image_id'].isin(val)].reset_index()
         elif split == 'test':
-            self.df = df[df['image_id'].isin(test)]
+            self.df = df[df['image_id'].isin(test)].reset_index()
         else:
             raise ValueError('Nope')
         self.transform = transform
@@ -34,13 +35,15 @@ class CelebADataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx):
-        img_name = self.df.iloc[idx, 0]
+        img_name = self.df.loc[idx, 'image_id']
         img_path = os.path.join(self.img_dir, img_name)
-        image = read_image(img_path)
+        image = Image.open(img_path)
+
+        attrs = ["Bags_Under_Eyes", "Bangs", "Black_Hair", "Blond_Hair", "Brown_Hair", "High_Cheekbones", "Mouth_Slightly_Open", "Chubby", "Eyeglasses", "Gray_Hair", "Narrow_Eyes", "Smiling", "Wearing_Hat"]
 
         # CelebA dataset labels are 1 for positive, -1 for negative.
         # Convert them to 1 for positive, 0 for negative.
-        labels = torch.tensor((self.df.iloc[idx, 1:].values + 1) // 2)
+        labels = torch.tensor(((self.df.loc[idx, attrs].values + 1) // 2).astype(np.float32))
 
         if self.transform:
             image = self.transform(image)
@@ -51,15 +54,22 @@ class CelebADataset(Dataset):
 transformations = Compose([
     CenterCrop(178),  # Center crop to remove the black edges (CelebA specific)
     Resize((128, 128)),  # Resize to 128x128
+    RandAugment(3, 15),  # Apply RandAugment with N=3 and M=15
     ToTensor(),  # Convert PIL image to PyTorch tensor
     Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Normalize to match the input range expected by ResNet
-    RandAugment(3, 15)  # Apply RandAugment with N=3 and M=15
+])
+
+test_transform = Compose([
+    CenterCrop(178),  # Center crop to remove the black edges (CelebA specific)
+    Resize((128, 128)),  # Resize to 128x128
+    ToTensor(),  # Convert PIL image to PyTorch tensor
+    Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Normalize to match the input range expected by ResNet
 ])
 
 # Initialize the dataset
 train_ds = CelebADataset("archive\img_align_celeba\img_align_celeba", split='train', transform=transformations)
-val_ds = CelebADataset("archive\img_align_celeba\img_align_celeba", split='val', transform=transformations)
-test_ds = CelebADataset("archive\img_align_celeba\img_align_celeba", split='test', transform=transformations)
+val_ds = CelebADataset("archive\img_align_celeba\img_align_celeba", split='val', transform=test_transform)
+test_ds = CelebADataset("archive\img_align_celeba\img_align_celeba", split='test', transform=test_transform)
 
 
 class CelebAAttributeModel(pl.LightningModule):
@@ -80,48 +90,43 @@ class CelebAAttributeModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         images, labels = batch
         preds = self.forward(images)
-        loss = sum(nn.BCELoss()(pred, label) for pred, label in zip(preds, labels.T))
+        loss = sum(nn.BCELoss()(pred.flatten(), label) for pred, label in zip(preds, labels.T))
         self.log('train_loss', loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         images, labels = batch
         preds = self.forward(images)
-        loss = sum(nn.BCELoss()(pred, label) for pred, label in zip(preds, labels.T))
+        loss = sum(nn.BCELoss()(pred.flatten(), label) for pred, label in zip(preds, labels.T))
         self.log('val_loss', loss)
         return loss
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=1e-4)
+        optimizer = optim.Adam(self.parameters(), lr=4*1e-4)
         return optimizer
 
 
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
-# Initialize the dataset
-celeba_dataset = CelebADataset("path_to_your_data/img_align_celeba", "path_to_your_data/list_attr_celeba.csv", transform=transformations)
+def main():
+    # Create DataLoaders for the training and validation sets
+    train_loader = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=256, num_workers=4, persistent_workers=True, pin_memory=True)
 
-# Split the dataset into train and validation sets
-train_size = int(0.8 * len(celeba_dataset))
-val_size = len(celeba_dataset) - train_size
-train_dataset, val_dataset = random_split(celeba_dataset, [train_size, val_size])
+    # Initialize the model
+    model = CelebAAttributeModel()
 
-# Create DataLoaders for the training and validation sets
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=32)
+    # Define any PyTorch Lightning callbacks you want to use
+    callbacks = [
+        pl.callbacks.ModelCheckpoint(save_top_k=1),  # Save the best model
+        # Add more callbacks here if needed
+    ]
 
-# Initialize the model
-model = CelebAAttributeModel()
+    # Initialize the Trainer
+    trainer = pl.Trainer(max_epochs=100, gpus=1, callbacks=callbacks, benchmark=True)  
 
-# Define any PyTorch Lightning callbacks you want to use
-callbacks = [
-    # Example: pl.callbacks.ModelCheckpoint(save_top_k=1),  # Save the best model
-    # Add more callbacks here if needed
-]
+    # Train the model
+    trainer.fit(model, train_loader, val_loader)
 
-# Initialize the Trainer
-trainer = pl.Trainer(max_epochs=10, gpus=1, callbacks=callbacks)  # Train for 10 epochs, adjust as needed
-
-# Train the model
-trainer.fit(model, train_loader, val_loader)
+if __name__ == '__main__':
+    main()
