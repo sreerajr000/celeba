@@ -107,11 +107,24 @@ class CelebAAttributeModel(pl.LightningModule):
 
 
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+def test():
+    test_dataloader = DataLoader(test_ds, batch_size=256, num_workers=3, pin_memory=True, persistent_workers=True)
+    model = CelebAAttributeModel.load_from_checkpoint(r"F:\celeba\lightning_logs\version_13\checkpoints\epoch=61-step=39431.ckpt").cuda()
+
+    all_labels = []
+    all_preds = []
+    for image, labels in tqdm(test_dataloader):
+        with torch.no_grad():
+            out = model(image.cuda())
+            print(out.shape)
+
 
 def main():
     # Create DataLoaders for the training and validation sets
-    train_loader = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=256, num_workers=4, persistent_workers=True, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=3, persistent_workers=True, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=256, num_workers=3, persistent_workers=True, pin_memory=True)
 
     # Initialize the model
     model = CelebAAttributeModel()
@@ -123,10 +136,11 @@ def main():
     ]
 
     # Initialize the Trainer
-    trainer = pl.Trainer(max_epochs=100, gpus=1, callbacks=callbacks, benchmark=True)  
+    trainer = pl.Trainer(max_epochs=100, gpus=1, callbacks=callbacks, benchmark=True, )  
 
     # Train the model
     trainer.fit(model, train_loader, val_loader)
 
 if __name__ == '__main__':
-    main()
+    # main()
+    test()
